@@ -19,7 +19,7 @@ const STATE_PATH = process.env.STATE_PATH || 'threads_monitor_state.json';
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const SESSION_ID = (process.env.THREADS_SESSION_ID || '').trim();
 const STORAGE_STATE_JSON = (process.env.THREADS_STORAGE_STATE_JSON || '').trim();
-const BUILD_ID = '2026-08-17-r7-dom-eval';
+const BUILD_ID = '2026-08-17-r8-unix-dates';
 
 type StoredState = {
   chatId?: number;
@@ -291,16 +291,23 @@ function extractStructuredSearchItems(payloads: unknown[]): SearchItem[] {
   return results;
 }
 
+function normalizeSearchTimestamp(value: string): string {
+  const raw = value.trim();
+  if (!raw) return '';
+  if (/^\d{10,13}$/.test(raw)) {
+    const numeric = Number(raw);
+    const milliseconds = numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+    const date = new Date(milliseconds);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return raw;
+}
+
 function searchItemToPost(item: SearchItem): ThreadsPost | null {
   const href = absoluteUrl(item.href);
   const match = href.match(/\/\@([^/]+)\/post\/([^/?#]+)/);
   if (!match) return null;
-  const rawTimestamp = item.timestamp.trim();
-  const numericTimestamp = Number(rawTimestamp);
-  const timestamp =
-    Number.isFinite(numericTimestamp) && numericTimestamp > 1_000_000_000
-      ? new Date(numericTimestamp < 10_000_000_000 ? numericTimestamp * 1000 : numericTimestamp).toISOString()
-      : rawTimestamp;
+  const timestamp = normalizeSearchTimestamp(item.timestamp);
   return {
     id: match[2],
     url: href,
@@ -368,7 +375,7 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
         const post = searchItemToPost(item);
         if (!post) return null;
         const structured = structuredById.get(post.id);
-        if (structured?.timestamp) post.timestamp = structured.timestamp;
+        if (structured?.timestamp) post.timestamp = normalizeSearchTimestamp(structured.timestamp);
         return post;
       })
       .filter((post): post is ThreadsPost => Boolean(post));
