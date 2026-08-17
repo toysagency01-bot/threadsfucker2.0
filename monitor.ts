@@ -219,20 +219,24 @@ async function scrollForSearch(page: Page): Promise<void> {
  * card, then lets the monitor apply the exact-phrase/reply/date filters.
  */
 async function extractSearchItemsFromDom(page: Page, keyword: string): Promise<SearchItem[]> {
-  return page.evaluate((wantedKeyword) => {
-    const normalizeText = (value: string): string =>
-      (value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('ru-RU');
+  // Pass a plain JavaScript string to Playwright. Passing this TypeScript
+  // callback directly through tsx makes esbuild inject __name(), which does
+  // not exist inside the browser page.
+  return page.evaluate(
+    `(wantedKeyword) => {
+      const normalizeText = (value) =>
+        (value || '').replace(/\\s+/g, ' ').trim().toLocaleLowerCase('ru-RU');
     const wanted = normalizeText(wantedKeyword);
-    const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/post/"]'));
-    const output: SearchItem[] = [];
-    const seen = new Set<string>();
+    const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
+    const output = [];
+    const seen = new Set();
 
     for (const anchor of anchors) {
       const href = anchor.getAttribute('href') || anchor.href || '';
       if (!href || seen.has(href)) continue;
 
-      let node: HTMLElement | null = anchor;
-      let card: HTMLElement | null = null;
+      let node = anchor;
+      let card = null;
       for (let depth = 0; depth < 12 && node; depth += 1, node = node.parentElement) {
         const raw = (node.innerText || '').trim();
         const hasTime = Boolean(node.querySelector('time, [datetime]'));
@@ -252,7 +256,7 @@ async function extractSearchItemsFromDom(page: Page, keyword: string): Promise<S
       if (!card) continue;
 
       const rawText = (card.innerText || '').trim();
-      const blocks = Array.from(card.querySelectorAll<HTMLElement>('[dir="auto"]'))
+      const blocks = Array.from(card.querySelectorAll('[dir="auto"]'))
         .map((element) => (element.innerText || '').replace(/\s+/g, ' ').trim())
         .filter(Boolean);
       const matchingBlock = blocks.find((text) => normalizeText(text).includes(wanted));
@@ -270,7 +274,9 @@ async function extractSearchItemsFromDom(page: Page, keyword: string): Promise<S
       output.push({ href, text, timestamp, isReply });
     }
     return output;
-  }, keyword);
+  }`,
+    keyword,
+  );
 }
 
 function extractStructuredSearchItems(payloads: unknown[]): SearchItem[] {
