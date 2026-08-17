@@ -19,7 +19,7 @@ const STATE_PATH = process.env.STATE_PATH || 'threads_monitor_state.json';
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const SESSION_ID = (process.env.THREADS_SESSION_ID || '').trim();
 const STORAGE_STATE_JSON = (process.env.THREADS_STORAGE_STATE_JSON || '').trim();
-const BUILD_ID = '2026-08-17-r6-dom-only';
+const BUILD_ID = '2026-08-17-r7-dom-eval';
 
 type StoredState = {
   chatId?: number;
@@ -188,7 +188,7 @@ async function extractSearchItemsFromDom(page: Page, keyword: string): Promise<S
   // callback directly through tsx makes esbuild inject __name(), which does
   // not exist inside the browser page.
   return page.evaluate(
-    `(wantedKeyword) => {
+    `((wantedKeyword) => {
       const asText = (value) => (typeof value === 'string' ? value : '');
       const normalizeText = (value) => asText(value).replace(/\\s+/g, ' ').trim().toLocaleLowerCase('ru-RU');
       const wanted = normalizeText(wantedKeyword);
@@ -249,8 +249,7 @@ async function extractSearchItemsFromDom(page: Page, keyword: string): Promise<S
         output.push({ href, text, timestamp, isReply });
       }
       return output;
-  }`,
-    keyword,
+  })(${JSON.stringify(keyword)})`,
   );
 }
 
