@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.env
+storageState.json
+threads-storage-state.json
