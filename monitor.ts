@@ -2,8 +2,6 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
-import { extractPostsFromPage } from './src/toolkit/parser.js';
-import { SELECTORS } from './src/toolkit/selectors.js';
 import { containsExactPhrase, isRecentTimestamp, normalize } from './src/filter.js';
 import type { ThreadsPost } from './src/types.js';
 
@@ -377,28 +375,20 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
 
     const replyFlags = await collectReplyFlags(page);
     const structuredReplyFlags = collectStructuredReplyFlags(payloads);
-    let toolkitPosts: ThreadsPost[] = [];
-    try {
-      toolkitPosts = await extractPostsFromPage(page, MAX_ITEMS_PER_KEYWORD);
-    } catch (error) {
-      log(`Toolkit parser failed; using DOM fallback for ${JSON.stringify(keyword)}`, String(error));
-    }
     const domItems = await extractSearchItemsFromDom(page, keyword);
     const structuredItems = extractStructuredSearchItems(payloads);
-    if (toolkitPosts.length === 0) {
-      log(`Toolkit parser returned 0; fallback counts for ${JSON.stringify(keyword)}`, {
-        domItems: domItems.length,
-        structuredItems: structuredItems.length,
-        postLinks: await page.locator('a[href*="/post/"]').count(),
-      });
-    }
+    log(`Extractor counts for ${JSON.stringify(keyword)}`, {
+      domItems: domItems.length,
+      structuredItems: structuredItems.length,
+      postLinks: await page.locator('a[href*="/post/"]').count(),
+    });
     const structuredById = new Map(
       structuredItems.map((item) => {
         const post = searchItemToPost(item);
         return [post?.id || item.href, item] as const;
       }),
     );
-    const fallbackPosts = domItems
+    const fallbackPosts = [...domItems, ...structuredItems]
       .map((item) => {
         const post = searchItemToPost(item);
         if (!post) return null;
@@ -407,7 +397,12 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
         return post;
       })
       .filter((post): post is ThreadsPost => Boolean(post));
-    const posts = toolkitPosts.length > 0 ? toolkitPosts : fallbackPosts;
+    const uniquePosts = new Map<string, ThreadsPost>();
+    for (const post of fallbackPosts) {
+      const previous = uniquePosts.get(post.id);
+      if (!previous || (!previous.timestamp && post.timestamp)) uniquePosts.set(post.id, post);
+    }
+    const posts = [...uniquePosts.values()].slice(0, MAX_ITEMS_PER_KEYWORD);
     const result: ThreadsPost[] = [];
     let exact = 0;
     let repliesSkipped = 0;
