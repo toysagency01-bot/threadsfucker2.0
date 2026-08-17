@@ -8,9 +8,9 @@ import type { ThreadsPost } from './src/types.js';
 const DEFAULT_KEYWORDS = [
   'ищу маркетолога',
   'ищу таргетолога',
-  'ищу специалиста meta ads',
-  'ищу специалиста google ads',
-  'ищу агентство трафика',
+  'нужен таргетолог',
+  'ищу специалиста по рекламе',
+  'ищу рекламное агентство',
 ];
 
 const MAX_POST_AGE_MINUTES = Number(process.env.MAX_POST_AGE_MINUTES || '240');
