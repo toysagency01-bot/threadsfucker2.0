@@ -1,0 +1,54 @@
+name: Threads monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: threads-monitor
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Check code
+        run: npm run build && npm test
+
+      - name: Search Threads and send Telegram alerts
+        run: npm start
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          THREADS_SESSION_ID: ${{ secrets.THREADS_SESSION_ID }}
+          THREADS_STORAGE_STATE_JSON: ${{ secrets.THREADS_STORAGE_STATE_JSON }}
+          MAX_POST_AGE_MINUTES: 240
+          MAX_ITEMS_PER_KEYWORD: 50
+
+      - name: Save deduplication state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add threads_monitor_state.json
+          git diff --cached --quiet || (git commit -m "Update Threads monitor state" && git push)
