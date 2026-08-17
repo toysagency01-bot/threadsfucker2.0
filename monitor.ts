@@ -19,6 +19,7 @@ const STATE_PATH = process.env.STATE_PATH || 'threads_monitor_state.json';
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const SESSION_ID = (process.env.THREADS_SESSION_ID || '').trim();
 const STORAGE_STATE_JSON = (process.env.THREADS_STORAGE_STATE_JSON || '').trim();
+const BUILD_ID = '2026-08-17-r6-dom-only';
 
 type StoredState = {
   chatId?: number;
@@ -144,40 +145,6 @@ async function blockHeavyResources(page: Page): Promise<void> {
   });
 }
 
-async function collectReplyFlags(page: Page): Promise<ReplyFlags> {
-  const flags = await page.evaluate(() => {
-    const output: Array<{ id: string; isReply: boolean }> = [];
-    const replyMarker = /(replying to|replied to|в ответ на|ответ пользователю|отвечает)/i;
-    const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/post/"]'));
-    const seen = new Set<string>();
-
-    for (const anchor of anchors) {
-      const href = anchor.getAttribute('href') || anchor.href || '';
-      const match = href.match(/\/post\/([^/?#]+)/);
-      if (!match || seen.has(match[1])) continue;
-      seen.add(match[1]);
-
-      let node: HTMLElement | null = anchor;
-      let card: HTMLElement | null = null;
-      for (let depth = 0; depth < 12 && node; depth += 1, node = node.parentElement) {
-        const text = (node.innerText || '').trim();
-        if (node.querySelector('time') && text.length >= 15 && text.length <= 7000) {
-          card = node;
-        }
-        if (node.matches('article, [role="article"], [data-pressable-container="true"]')) {
-          card = node;
-          break;
-        }
-      }
-      const raw = (card || anchor.parentElement)?.innerText || '';
-      output.push({ id: match[1], isReply: replyMarker.test(raw) });
-    }
-    return output;
-  });
-
-  return new Map(flags.map((item) => [item.id, item.isReply]));
-}
-
 function collectStructuredReplyFlags(payloads: unknown[]): ReplyFlags {
   const flags: ReplyFlags = new Map();
   const walk = (value: unknown): void => {
@@ -222,56 +189,66 @@ async function extractSearchItemsFromDom(page: Page, keyword: string): Promise<S
   // not exist inside the browser page.
   return page.evaluate(
     `(wantedKeyword) => {
-      const normalizeText = (value) =>
-        (value || '').replace(/\\s+/g, ' ').trim().toLocaleLowerCase('ru-RU');
-    const wanted = normalizeText(wantedKeyword);
-    const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
-    const output = [];
-    const seen = new Set();
+      const asText = (value) => (typeof value === 'string' ? value : '');
+      const normalizeText = (value) => asText(value).replace(/\\s+/g, ' ').trim().toLocaleLowerCase('ru-RU');
+      const wanted = normalizeText(wantedKeyword);
+      const anchors = Array.from(document.querySelectorAll('a[href*="/post/"]'));
+      const output = [];
+      const seen = new Set();
 
-    for (const anchor of anchors) {
-      const href = anchor.getAttribute('href') || anchor.href || '';
-      if (!href || seen.has(href)) continue;
+      for (const anchor of anchors) {
+        const href = asText(anchor.getAttribute('href') || anchor.href);
+        if (!href || seen.has(href)) continue;
 
-      let node = anchor;
-      let card = null;
-      for (let depth = 0; depth < 12 && node; depth += 1, node = node.parentElement) {
-        const raw = (node.innerText || '').trim();
-        const hasTime = Boolean(node.querySelector('time, [datetime]'));
-        const hasPostLink = Boolean(node.querySelector('a[href*="/post/"]'));
-        if (hasPostLink && hasTime && raw.length >= 15 && raw.length <= 7000) {
-          if (!card || raw.length < (card.innerText || '').length) card = node;
+        let node = anchor;
+        let card = null;
+        for (let depth = 0; depth < 12 && node; depth += 1, node = node.parentElement) {
+          const raw = asText(node.innerText).trim();
+          const hasTime = Boolean(node.querySelector('time, [datetime]'));
+          const hasPostLink = Boolean(node.querySelector('a[href*="/post/"]'));
+          const rawLength = raw.length;
+          if (hasPostLink && hasTime && rawLength >= 15 && rawLength <= 7000) {
+            const cardLength = card ? asText(card.innerText).length : Number.MAX_SAFE_INTEGER;
+            if (!card || rawLength < cardLength) card = node;
+          }
+          if (node.matches('article, [role="article"], [data-pressable-container="true"]') && rawLength >= 15) {
+            card = node;
+            break;
+          }
         }
-        if (node.matches('article, [role="article"], [data-pressable-container="true"]') && raw.length >= 15) {
-          card = node;
-          break;
+
+        if (!card) {
+          card = anchor.closest('article, [role="article"], [data-pressable-container="true"]') || anchor.parentElement;
         }
+        if (!card) continue;
+
+        const rawText = asText(card.innerText).trim();
+        const blocks = Array.from(card.querySelectorAll('[dir="auto"]'))
+          .map((element) => asText(element.innerText).replace(/\\s+/g, ' ').trim())
+          .filter((value) => value.length > 0);
+        let longestBlock = '';
+        for (const block of blocks) {
+          if (block.length > longestBlock.length) longestBlock = block;
+        }
+        let matchingBlock = '';
+        for (const block of blocks) {
+          if (normalizeText(block).includes(wanted)) {
+            matchingBlock = block;
+            break;
+          }
+        }
+        const text = matchingBlock || longestBlock || rawText;
+        const time = card.querySelector('time, [datetime]');
+        const timestamp = time
+          ? asText(time.getAttribute('datetime') || time.getAttribute('title') || time.textContent)
+          : '';
+        const lower = normalizeText(rawText);
+        const isReply = /replying to|replied to|в ответ на|ответ пользователю|отвечает/.test(lower);
+
+        seen.add(href);
+        output.push({ href, text, timestamp, isReply });
       }
-
-      if (!card) {
-        card = anchor.closest('article, [role="article"], [data-pressable-container="true"]') || anchor.parentElement;
-      }
-      if (!card) continue;
-
-      const rawText = (card.innerText || '').trim();
-      const blocks = Array.from(card.querySelectorAll('[dir="auto"]'))
-        .map((element) => (element.innerText || '').replace(/\s+/g, ' ').trim())
-        .filter(Boolean);
-      const matchingBlock = blocks.find((text) => normalizeText(text).includes(wanted));
-      const text = matchingBlock || blocks.sort((a, b) => b.length - a.length)[0] || rawText;
-      const time = card.querySelector('time, [datetime]');
-      const timestamp =
-        time?.getAttribute('datetime') ||
-        time?.getAttribute('title') ||
-        time?.textContent ||
-        '';
-      const lower = normalizeText(rawText);
-      const isReply = /replying to|replied to|в ответ на|ответ пользователю|отвечает/.test(lower);
-
-      seen.add(href);
-      output.push({ href, text, timestamp, isReply });
-    }
-    return output;
+      return output;
   }`,
     keyword,
   );
@@ -373,7 +350,6 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
       return [];
     }
 
-    const replyFlags = await collectReplyFlags(page);
     const structuredReplyFlags = collectStructuredReplyFlags(payloads);
     const domItems = await extractSearchItemsFromDom(page, keyword);
     const structuredItems = extractStructuredSearchItems(payloads);
@@ -403,6 +379,12 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
       if (!previous || (!previous.timestamp && post.timestamp)) uniquePosts.set(post.id, post);
     }
     const posts = [...uniquePosts.values()].slice(0, MAX_ITEMS_PER_KEYWORD);
+    const domReplyIds = new Set(
+      domItems
+        .filter((item) => item.isReply)
+        .map((item) => searchItemToPost(item)?.id)
+        .filter((id): id is string => Boolean(id)),
+    );
     const result: ThreadsPost[] = [];
     let exact = 0;
     let repliesSkipped = 0;
@@ -410,7 +392,7 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
     for (const post of posts) {
       if (!containsExactPhrase(post.content, keyword)) continue;
       exact += 1;
-      if (structuredReplyFlags.get(post.id) === true || replyFlags.get(post.id) === true) {
+      if (structuredReplyFlags.get(post.id) === true || domReplyIds.has(post.id)) {
         repliesSkipped += 1;
         continue;
       }
@@ -425,7 +407,8 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
     });
     return result;
   } catch (error) {
-    log(`Search failed for ${JSON.stringify(keyword)}`, String(error));
+    const details = error instanceof Error ? error.stack || `${error.name}: ${error.message}` : String(error);
+    log(`Search failed for ${JSON.stringify(keyword)}`, details);
     return [];
   } finally {
     await page.close();
@@ -474,6 +457,7 @@ function formatPost(post: ThreadsPost, keyword: string): string {
 }
 
 async function main(): Promise<void> {
+  log(`Monitor build ${BUILD_ID}`);
   if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is missing');
   if (!Number.isFinite(MAX_POST_AGE_MINUTES) || MAX_POST_AGE_MINUTES < 1) throw new Error('MAX_POST_AGE_MINUTES must be positive');
 
