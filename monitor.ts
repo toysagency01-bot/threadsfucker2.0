@@ -29,6 +29,13 @@ type StoredState = {
 
 type ReplyFlags = Map<string, boolean>;
 
+type SearchItem = {
+  href: string;
+  text: string;
+  timestamp: string;
+  isReply?: boolean;
+};
+
 function log(message: string, details?: unknown): void {
   if (details === undefined) console.log(`[monitor] ${message}`);
   else console.log(`[monitor] ${message}`, JSON.stringify(details));
@@ -204,6 +211,130 @@ async function scrollForSearch(page: Page): Promise<void> {
   }
 }
 
+/**
+ * Threads changes its React/card markup frequently. The copied Toolkit
+ * parser is useful when its expected card structure is present, but it can
+ * return zero items while the page visibly contains posts. This extractor
+ * intentionally relies only on stable post links and the nearest readable
+ * card, then lets the monitor apply the exact-phrase/reply/date filters.
+ */
+async function extractSearchItemsFromDom(page: Page, keyword: string): Promise<SearchItem[]> {
+  return page.evaluate((wantedKeyword) => {
+    const normalizeText = (value: string): string =>
+      (value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('ru-RU');
+    const wanted = normalizeText(wantedKeyword);
+    const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/post/"]'));
+    const output: SearchItem[] = [];
+    const seen = new Set<string>();
+
+    for (const anchor of anchors) {
+      const href = anchor.getAttribute('href') || anchor.href || '';
+      if (!href || seen.has(href)) continue;
+
+      let node: HTMLElement | null = anchor;
+      let card: HTMLElement | null = null;
+      for (let depth = 0; depth < 12 && node; depth += 1, node = node.parentElement) {
+        const raw = (node.innerText || '').trim();
+        const hasTime = Boolean(node.querySelector('time, [datetime]'));
+        const hasPostLink = Boolean(node.querySelector('a[href*="/post/"]'));
+        if (hasPostLink && hasTime && raw.length >= 15 && raw.length <= 7000) {
+          if (!card || raw.length < (card.innerText || '').length) card = node;
+        }
+        if (node.matches('article, [role="article"], [data-pressable-container="true"]') && raw.length >= 15) {
+          card = node;
+          break;
+        }
+      }
+
+      if (!card) {
+        card = anchor.closest('article, [role="article"], [data-pressable-container="true"]') || anchor.parentElement;
+      }
+      if (!card) continue;
+
+      const rawText = (card.innerText || '').trim();
+      const blocks = Array.from(card.querySelectorAll<HTMLElement>('[dir="auto"]'))
+        .map((element) => (element.innerText || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      const matchingBlock = blocks.find((text) => normalizeText(text).includes(wanted));
+      const text = matchingBlock || blocks.sort((a, b) => b.length - a.length)[0] || rawText;
+      const time = card.querySelector('time, [datetime]');
+      const timestamp =
+        time?.getAttribute('datetime') ||
+        time?.getAttribute('title') ||
+        time?.textContent ||
+        '';
+      const lower = normalizeText(rawText);
+      const isReply = /replying to|replied to|в ответ на|ответ пользователю|отвечает/.test(lower);
+
+      seen.add(href);
+      output.push({ href, text, timestamp, isReply });
+    }
+    return output;
+  }, keyword);
+}
+
+function extractStructuredSearchItems(payloads: unknown[]): SearchItem[] {
+  const results: SearchItem[] = [];
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const node = value as Record<string, unknown>;
+    let text = node.text || node.caption || node.caption_text || node.text_content || '';
+    if (typeof text === 'object' && text) {
+      const nested = text as Record<string, unknown>;
+      text = nested.text || nested.value || '';
+    }
+    const permalink = String(node.permalink || node.post_url || node.url || '');
+    const username = String(
+      node.username ||
+        (node.user && typeof node.user === 'object' && 'username' in node.user
+          ? (node.user as Record<string, unknown>).username
+          : '') ||
+        '',
+    );
+    const code = String(node.code || node.shortcode || node.short_code || '');
+    const href = permalink || (username && code ? `https://www.threads.com/@${username}/post/${code}` : '');
+    if (typeof text === 'string' && text.trim() && href.includes('/post/')) {
+      results.push({
+        href,
+        text: text.trim(),
+        timestamp: String(node.timestamp || node.created_at || node.taken_at || node.created_time || ''),
+        isReply: Boolean(node.is_reply || node.isReply || node.reply_to || node.reply_to_id || node.parent_id),
+      });
+    }
+    Object.values(node).forEach(walk);
+  };
+  payloads.forEach(walk);
+  return results;
+}
+
+function searchItemToPost(item: SearchItem): ThreadsPost | null {
+  const href = absoluteUrl(item.href);
+  const match = href.match(/\/\@([^/]+)\/post\/([^/?#]+)/);
+  if (!match) return null;
+  const rawTimestamp = item.timestamp.trim();
+  const numericTimestamp = Number(rawTimestamp);
+  const timestamp =
+    Number.isFinite(numericTimestamp) && numericTimestamp > 1_000_000_000
+      ? new Date(numericTimestamp < 10_000_000_000 ? numericTimestamp * 1000 : numericTimestamp).toISOString()
+      : rawTimestamp;
+  return {
+    id: match[2],
+    url: href,
+    author: {
+      username: match[1],
+      displayName: match[1],
+      profileUrl: `https://www.threads.com/@${match[1]}`,
+    },
+    content: item.text,
+    timestamp,
+    stats: { likes: 0, replies: 0, reposts: 0, shares: 0 },
+  };
+}
+
 async function searchKeyword(context: BrowserContext, keyword: string): Promise<ThreadsPost[]> {
   const page = await context.newPage();
   const payloads: unknown[] = [];
@@ -240,7 +371,37 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
 
     const replyFlags = await collectReplyFlags(page);
     const structuredReplyFlags = collectStructuredReplyFlags(payloads);
-    const posts = await extractPostsFromPage(page, MAX_ITEMS_PER_KEYWORD);
+    let toolkitPosts: ThreadsPost[] = [];
+    try {
+      toolkitPosts = await extractPostsFromPage(page, MAX_ITEMS_PER_KEYWORD);
+    } catch (error) {
+      log(`Toolkit parser failed; using DOM fallback for ${JSON.stringify(keyword)}`, String(error));
+    }
+    const domItems = await extractSearchItemsFromDom(page, keyword);
+    const structuredItems = extractStructuredSearchItems(payloads);
+    if (toolkitPosts.length === 0) {
+      log(`Toolkit parser returned 0; fallback counts for ${JSON.stringify(keyword)}`, {
+        domItems: domItems.length,
+        structuredItems: structuredItems.length,
+        postLinks: await page.locator('a[href*="/post/"]').count(),
+      });
+    }
+    const structuredById = new Map(
+      structuredItems.map((item) => {
+        const post = searchItemToPost(item);
+        return [post?.id || item.href, item] as const;
+      }),
+    );
+    const fallbackPosts = domItems
+      .map((item) => {
+        const post = searchItemToPost(item);
+        if (!post) return null;
+        const structured = structuredById.get(post.id);
+        if (structured?.timestamp) post.timestamp = structured.timestamp;
+        return post;
+      })
+      .filter((post): post is ThreadsPost => Boolean(post));
+    const posts = toolkitPosts.length > 0 ? toolkitPosts : fallbackPosts;
     const result: ThreadsPost[] = [];
     let exact = 0;
     let repliesSkipped = 0;
