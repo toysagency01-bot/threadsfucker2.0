@@ -2,15 +2,20 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
-import { containsExactPhrase, isRecentTimestamp, normalize } from './src/filter.js';
+import { isRecentTimestamp, matchesMarketingLead, normalize } from './src/filter.js';
 import type { ThreadsPost } from './src/types.js';
 
 const DEFAULT_KEYWORDS = [
-  'ищу маркетолога',
-  'ищу таргетолога',
-  'ищу специалиста meta ads',
-  'ищу специалиста google ads',
-  'ищу агентство трафика',
+  'маркетолог',
+  'таргетолог',
+  'реклама',
+  'продвижение',
+  'агентство',
+  'привлечь клиентов',
+  'новые клиенты',
+  'заявки',
+  'лиды',
+  'нужен специалист',
 ];
 
 const MAX_POST_AGE_MINUTES = Number(process.env.MAX_POST_AGE_MINUTES || '240');
@@ -19,7 +24,7 @@ const STATE_PATH = process.env.STATE_PATH || 'threads_monitor_state.json';
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const SESSION_ID = (process.env.THREADS_SESSION_ID || '').trim();
 const STORAGE_STATE_JSON = (process.env.THREADS_STORAGE_STATE_JSON || '').trim();
-const BUILD_ID = '2026-08-17-r8-unix-dates';
+const BUILD_ID = '2026-08-31-r10-semantic-fixed';
 
 type StoredState = {
   chatId?: number;
@@ -38,15 +43,6 @@ type SearchItem = {
 function log(message: string, details?: unknown): void {
   if (details === undefined) console.log(`[monitor] ${message}`);
   else console.log(`[monitor] ${message}`, JSON.stringify(details));
-}
-
-function keywordsFromEnv(): string[] {
-  const raw = process.env.KEYWORDS || '';
-  const values = raw
-    .split(/[\n,]/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  return values.length > 0 ? values : DEFAULT_KEYWORDS;
 }
 
 function escapeHtml(value: string): string {
@@ -181,7 +177,7 @@ async function scrollForSearch(page: Page): Promise<void> {
  * parser is useful when its expected card structure is present, but it can
  * return zero items while the page visibly contains posts. This extractor
  * intentionally relies only on stable post links and the nearest readable
- * card, then lets the monitor apply the exact-phrase/reply/date filters.
+ * card, then lets the monitor apply the semantic/reply/date filters.
  */
 async function extractSearchItemsFromDom(page: Page, keyword: string): Promise<SearchItem[]> {
   // Pass a plain JavaScript string to Playwright. Passing this TypeScript
@@ -392,12 +388,12 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
         .filter((id): id is string => Boolean(id)),
     );
     const result: ThreadsPost[] = [];
-    let exact = 0;
+    let semantic = 0;
     let repliesSkipped = 0;
 
     for (const post of posts) {
-      if (!containsExactPhrase(post.content, keyword)) continue;
-      exact += 1;
+      if (!matchesMarketingLead(post.content)) continue;
+      semantic += 1;
       if (structuredReplyFlags.get(post.id) === true || domReplyIds.has(post.id)) {
         repliesSkipped += 1;
         continue;
@@ -407,7 +403,7 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
 
     log(`Search ${JSON.stringify(keyword)} completed`, {
       raw: posts.length,
-      exact,
+      semantic,
       repliesSkipped,
       root: result.length,
     });
@@ -470,23 +466,26 @@ async function main(): Promise<void> {
   const state = await loadState();
   const chatId = await findChatId(state);
   const { browser, context } = await createContext();
-  const keywords = keywordsFromEnv();
+  // Keep the query list fixed in code so an old KEYWORDS environment value
+  // cannot silently restore the previous search phrases.
+  const keywords = DEFAULT_KEYWORDS;
+  log(`Search queries (${keywords.length})`, keywords);
   let sent = 0;
 
   try {
-    for (const keyword of keywords) {
-      const posts = await searchKeyword(context, keyword);
+    for (const query of keywords) {
+      const posts = await searchKeyword(context, query);
       for (const post of posts) {
         const id = post.id || postIdFromUrl(post.url);
         if (!id || !isRecentTimestamp(post.timestamp, MAX_POST_AGE_MINUTES)) {
-          log(`Skipping old or undated post for ${JSON.stringify(keyword)}`, { timestamp: post.timestamp });
+          log(`Skipping old or undated post for ${JSON.stringify(query)}`, { timestamp: post.timestamp });
           continue;
         }
         if (state.sentPostIds[id]) continue;
 
         await telegramRequest('sendMessage', {
           chat_id: chatId,
-          text: formatPost(post, keyword),
+          text: formatPost(post, query),
           parse_mode: 'HTML',
           disable_web_page_preview: true,
         });
