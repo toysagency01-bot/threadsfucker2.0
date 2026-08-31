@@ -2,6 +2,12 @@ export function normalize(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLocaleLowerCase('ru-RU');
 }
 
+// Backward-compatible helper for repositories that still contain the original
+// unit test. The monitor does not use exact matching anymore.
+export function containsExactPhrase(text: string, phrase: string): boolean {
+  return normalize(text).includes(normalize(phrase));
+}
+
 const COMMERCIAL_INTENT_PATTERNS = [
   /(?<!\p{L})ищу(?!\p{L})/u,
   /(?<!\p{L})ищем(?!\p{L})/u,
