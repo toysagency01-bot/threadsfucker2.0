@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
-import { isRecentTimestamp, matchesMarketingLead, normalize } from './src/filter.js';
+import { classifyMarketingLead, isRecentTimestamp, normalize } from './src/filter.js';
 import type { ThreadsPost } from './src/types.js';
 
 const DEFAULT_KEYWORDS = [
@@ -10,12 +10,15 @@ const DEFAULT_KEYWORDS = [
   'таргетолог',
   'реклама',
   'продвижение',
-  'агентство',
   'привлечь клиентов',
-  'новые клиенты',
   'заявки',
   'лиды',
+  'ищу специалиста',
   'нужен специалист',
+  'посоветуйте специалиста',
+  'посоветуйте специалиста по рекламе',
+  'посоветуйте таргетолога',
+  'посоветуйте маркетолога',
 ];
 
 const MAX_POST_AGE_MINUTES = Number(process.env.MAX_POST_AGE_MINUTES || '240');
@@ -24,7 +27,7 @@ const STATE_PATH = process.env.STATE_PATH || 'threads_monitor_state.json';
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 const SESSION_ID = (process.env.THREADS_SESSION_ID || '').trim();
 const STORAGE_STATE_JSON = (process.env.THREADS_STORAGE_STATE_JSON || '').trim();
-const BUILD_ID = '2026-08-31-r10-semantic-fixed';
+const BUILD_ID = '2026-08-31-r13-niche-queries';
 
 type StoredState = {
   chatId?: number;
@@ -390,9 +393,14 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
     const result: ThreadsPost[] = [];
     let semantic = 0;
     let repliesSkipped = 0;
+    const rejected: Record<string, number> = {};
 
     for (const post of posts) {
-      if (!matchesMarketingLead(post.content)) continue;
+      const classification = classifyMarketingLead(post.content);
+      if (!classification.matches) {
+        rejected[classification.reason] = (rejected[classification.reason] || 0) + 1;
+        continue;
+      }
       semantic += 1;
       if (structuredReplyFlags.get(post.id) === true || domReplyIds.has(post.id)) {
         repliesSkipped += 1;
@@ -406,6 +414,7 @@ async function searchKeyword(context: BrowserContext, keyword: string): Promise<
       semantic,
       repliesSkipped,
       root: result.length,
+      rejected,
     });
     return result;
   } catch (error) {
