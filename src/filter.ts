@@ -2,10 +2,6 @@ export function normalize(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLocaleLowerCase('ru-RU');
 }
 
-export function containsExactPhrase(text: string, phrase: string): boolean {
-  return normalize(text).includes(normalize(phrase));
-}
-
 const COMMERCIAL_INTENT_PATTERNS = [
   /(?<!\p{L})ищу(?!\p{L})/u,
   /(?<!\p{L})ищем(?!\p{L})/u,
